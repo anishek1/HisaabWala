@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+tests/audio/*.oga
+tests/audio/*.ogg
+tests/audio/*.wav
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+node_modules/
