@@ -8,7 +8,8 @@
 **Version:** v1 (MVP)
 **Team:** 2-3 engineers
 **Timeline:** 5 days
-**Interface:** Pure WhatsApp (no app, no dashboard, no frontend)
+**Interface:** Pure Telegram bot (no app, no dashboard, no frontend)
+**Budget:** ₹0 — entirely free-tier stack
 
 ## 2. Problem Statement
 
@@ -18,42 +19,46 @@
 
 - Hindi-speaking small shopkeeper (kirana, hardware, general store)
 - Tier 2-3 Indian cities
-- Semi-literate, uses WhatsApp daily
+- Semi-literate, uses WhatsApp daily (Telegram for v1 demo, WhatsApp migration in v2)
 - Does mental accounting, no written records
 - Primary pain: tracking udhaar (credit) and collecting dues
 
 ## 4. Tech Stack
 
-| Component | Technology |
-|-----------|-----------|
-| Backend | FastAPI + Uvicorn |
-| Database | Supabase PostgreSQL |
-| File Storage | Supabase Storage |
-| ASR | Groq Whisper API |
-| LLM | Claude API (Haiku for extraction, cost-efficient) |
-| WhatsApp | Twilio WhatsApp Business API |
-| Task Queue | Celery + Redis |
-| Deployment | Docker Compose on EC2 (or Railway/Render) |
+| Component | Technology | Cost |
+|-----------|-----------|------|
+| Backend | FastAPI + Uvicorn | Free |
+| Database | Supabase PostgreSQL (free tier) | Free |
+| File Storage | Supabase Storage (free tier, 1GB) | Free |
+| ASR | Groq Whisper API (free tier) | Free |
+| LLM | Groq + Llama 3.3 70B (free tier) | Free |
+| Messaging | Telegram Bot API | Free |
+| Task Queue | APScheduler + asyncio (in-process, no Redis) | Free |
+| Deployment | Railway (free tier, 500 hrs/month) | Free |
+
+**Rate limit awareness:** Groq free tier ≈ 30 req/min. Each voice note = 2 Groq calls (Whisper + Llama) = max ~15 voice notes/min. Sufficient for demo/early users.
+
+**v2 migration path:** Telegram → Twilio WhatsApp API. Messaging layer is an adapter — backend logic unchanged.
 
 ## 5. Features (v1 Scope)
 
 ### 5.1 Zero-Friction Registration
-- First message from unknown number triggers onboarding
-- System detects phone number from Twilio webhook payload (no manual input)
+- First message from unknown user triggers onboarding
+- System detects Telegram user ID + username from update payload (no manual input)
 - Only collects: shop name (via voice or text)
-- Flow: Unknown number → welcome message → shopkeeper says shop name → merchant created → confirmation sent
+- Flow: Unknown user sends /start or any message → welcome message → shopkeeper says shop name → merchant created → confirmation sent
 - `is_onboarding` flag on merchant row routes messages through onboarding vs normal flow
 
 ### 5.2 Voice-to-Ledger (Core)
-- Shopkeeper sends WhatsApp voice note
-- Pipeline: Twilio webhook → download .ogg audio → ffmpeg convert if needed → Groq Whisper transcription → Claude extraction → validate → store → confirm
+- Shopkeeper sends Telegram voice note
+- Pipeline: Telegram Bot API update → download .oga audio (same opus codec as .ogg, Whisper compatible) → Groq Whisper transcription → Groq Llama 3.3 70B extraction → validate → store → confirm
 - Handles multi-transaction voice notes ("Ramesh ne 500 diye, Suresh 200 udhaar, Mohan ka 1000 aa gaya")
 - Multi-transaction confirmations sent as one numbered message, not individual floods
 - Hindi number normalization ("paanch sau" → 500) handled by LLM prompt
 
 ### 5.3 Auto-Confirm with 2-Minute Timer
 - Transactions stored immediately with status "pending"
-- Celery countdown task (2 min) auto-confirms if no correction received
+- asyncio delayed task (2 min) auto-confirms if no correction received
 - Batching: wait 30 seconds of inactivity before sending consolidated confirmation message
 - 2-minute timer starts from the batched confirmation, not from individual transaction creation
 
@@ -73,17 +78,17 @@
 - Returns net outstanding balance
 
 ### 5.7 Daily Auto-Summary
-- Celery beat task at 9 PM IST
+- APScheduler job at 9 PM IST
 - Queries each active merchant's today's transactions (IST timezone-aware)
-- Sends formatted WhatsApp message: today's sales, credit given, credit recovered, net position
-- Uses Meta-approved WhatsApp template message (required for outside 24-hour session window)
+- Sends formatted Telegram message: today's sales, credit given, credit recovered, net position
+- No template approval needed — Telegram has no session window restrictions
 
 ### 5.8 Credit-Ready PDF Report
 - Triggered by: "mera hisaab bhejo", "monthly report", or similar
 - Aggregates: total inflow, total outflow, net position, per-entity receivables/payables
 - Bilingual: Hindi + English (readable by both shopkeeper and loan officer)
-- Generated via HTML template + WeasyPrint (in Docker for dependency management)
-- Uploaded to Supabase Storage, download link sent via WhatsApp
+- Generated via HTML template + WeasyPrint (or fpdf2 for lighter dependency footprint on Railway)
+- Uploaded to Supabase Storage, download link sent via Telegram (or sent as document directly — Telegram supports file sending natively)
 
 ### 5.9 Voice-as-Receipt
 - Original audio file stored in Supabase Storage
@@ -128,7 +133,8 @@ Every incoming message classified before processing. Single LLM call (Option B) 
 | Column | Type | Notes |
 |--------|------|-------|
 | id | UUID | PK |
-| phone_number | VARCHAR | Unique, from Twilio payload |
+| telegram_id | BIGINT | Unique, from Telegram update payload |
+| telegram_username | VARCHAR | Nullable, for reference |
 | shop_name | VARCHAR | Collected during onboarding |
 | language | VARCHAR | Default "hi", for v2 multi-lang |
 | is_onboarding | BOOLEAN | Routes message flow |
@@ -157,7 +163,7 @@ Every incoming message classified before processing. Single LLM call (Option B) 
 | audio_url | VARCHAR | Supabase Storage URL |
 | raw_transcript | TEXT | Whisper output |
 | status | VARCHAR | pending / confirmed / rejected |
-| message_id | VARCHAR | Twilio message SID (idempotency) |
+| message_id | BIGINT | Telegram message ID (idempotency) |
 | batch_id | UUID | Groups multi-transaction voice notes |
 | created_at | TIMESTAMPTZ | UTC |
 | confirmed_at | TIMESTAMPTZ | Nullable, set on confirm |
@@ -169,7 +175,7 @@ Every incoming message classified before processing. Single LLM call (Option B) 
 | merchant_id | UUID | FK → merchants |
 | direction | VARCHAR | "inbound" / "outbound" |
 | message_type | VARCHAR | voice / text |
-| twilio_sid | VARCHAR | Twilio message SID |
+| telegram_message_id | BIGINT | Telegram message ID (idempotency) |
 | raw_content | TEXT | Transcript or text body |
 | created_at | TIMESTAMPTZ | UTC |
 
@@ -189,8 +195,8 @@ Every incoming message classified before processing. Single LLM call (Option B) 
 | LLM extraction low confidence (<0.7) | Ask for clarification in Hindi |
 | No name extractable | "Kiska naam batayein?" |
 | Multi-transaction ambiguous correction | List pending with numbers, ask which one |
-| Twilio webhook retry (duplicate SID) | Check message_id, skip if already processed |
-| API failure (Groq/Claude down) | "Abhi thodi dikkat hai, thodi der mein dobara bhejiye." |
+| Telegram duplicate update (same update_id) | Check message_id, skip if already processed |
+| API failure (Groq down) | "Abhi thodi dikkat hai, thodi der mein dobara bhejiye." |
 
 ## 10. Security & Data Isolation
 
@@ -198,41 +204,43 @@ Every incoming message classified before processing. Single LLM call (Option B) 
 - Each merchant only sees their own entities and transactions
 - Phone numbers stored but not exposed in responses
 - Audio files in Supabase Storage with merchant-scoped paths
-- Rate limiting: max 50 messages per merchant per day (Redis counter)
+- Rate limiting: max 50 messages per merchant per day (in-memory counter via dict/defaultdict, acceptable for single-instance deployment)
 
-## 11. Third-Party Compliance (Pre-Build Requirements)
+## 11. Third-Party Setup (Pre-Build Requirements)
 
 | Task | Timeline | Blocker Level |
 |------|----------|---------------|
-| Twilio WhatsApp Business API approval | 1-7 days | **CRITICAL — start immediately** |
-| Meta WhatsApp template messages (daily summary, re-engagement) | 24-48 hours after submission | HIGH |
-| Groq API access verification + rate limit check | Same day | MEDIUM |
-| Claude API budget estimation | Same day | LOW |
+| Create Telegram bot via BotFather | 2 minutes | **CRITICAL — do first** |
+| Groq API account + verify Whisper + Llama access | Same day | HIGH |
+| Supabase project creation | Same day | HIGH |
+| Railway account setup | Same day | MEDIUM |
+| Test .oga voice note compatibility with Groq Whisper | Day 1 | MEDIUM |
 
 ## 12. Audio Format Handling
 
-- Twilio delivers WhatsApp voice notes as .ogg opus files
-- Verify Groq Whisper accepts .ogg directly
-- If not: ffmpeg conversion step (.ogg → .wav/.mp3) on server
+- Telegram delivers voice notes as .oga files (OGG container, Opus codec)
+- Groq Whisper should accept this directly (same underlying format as .ogg)
+- If not: ffmpeg conversion step (.oga → .wav/.mp3) — ffmpeg available on Railway via buildpack
 - **Test on Day 1 — do not assume compatibility**
 
 ## 13. Deployment Architecture
 
-- Docker Compose with 4 services: FastAPI + Uvicorn, Redis, Celery worker, Celery beat
-- Single EC2 instance (or Railway/Render)
+- Single Railway service running: FastAPI + Uvicorn with APScheduler (in-process)
+- No Redis, no Celery, no separate worker processes — simplified for free tier
+- Telegram bot uses webhook mode (not polling) for production; polling mode acceptable during development
 - Supabase pgbouncer enabled for connection pooling (free tier has connection limits)
 - All timestamps stored as UTC, queries converted to IST where needed
-- Environment variables: Twilio credentials, Groq API key, Claude API key, Supabase URL + key, Redis URL
+- Environment variables: Telegram bot token, Groq API key, Supabase URL + key
 
 ## 14. Build Schedule
 
 | Day | Focus | Deliverable |
 |-----|-------|-------------|
-| Day 1 | Twilio webhook + audio pipeline | Voice note received, downloaded, transcribed. WhatsApp templates submitted. Audio format verified. |
-| Day 2 | LLM extraction + intent routing | Claude prompt handling all intents. Multi-transaction extraction. Hindi number normalization tested with 20+ real voice samples. |
-| Day 3 | Full transaction flow | Entity resolution, DB storage, confirmation messages, auto-confirm timer, correction flow, duplicate detection. |
-| Day 4 | Queries + reports + summary | Udhaar balance queries, PDF report generation, daily summary Celery task, intent routing integrated end-to-end. |
-| Day 5 | Integration testing + deployment | End-to-end testing with real phones, edge cases, error handling, Docker Compose deployment, production Twilio number live. |
+| Day 1 | Telegram bot + audio pipeline | Bot created via BotFather. Voice note received, downloaded, transcribed via Groq Whisper. Audio format (.oga) verified. Supabase tables created. |
+| Day 2 | LLM extraction + intent routing | Groq Llama 3.3 70B prompt handling all intents. Multi-transaction extraction. Hindi number normalization tested with 20+ real Hindi voice samples. |
+| Day 3 | Full transaction flow | Entity resolution, DB storage, confirmation messages, auto-confirm timer (asyncio), correction flow, duplicate detection. |
+| Day 4 | Queries + reports + summary | Udhaar balance queries, PDF report generation, daily summary APScheduler job, intent routing integrated end-to-end. |
+| Day 5 | Integration testing + deployment | End-to-end testing with real phones, edge cases, error handling, Railway deployment, webhook configured. |
 
 ## 15. Explicitly Out of v1 Scope
 
@@ -256,6 +264,7 @@ Every incoming message classified before processing. Single LLM call (Option B) 
 
 ## 17. v2 Roadmap (Post-MVP)
 
+- **Migrate Telegram → Twilio WhatsApp Business API** (messaging adapter swap, backend unchanged)
 - Direct udhaar reminders to debtors (WhatsApp + SMS)
 - Contact number collection and storage
 - Multi-language support (Bhojpuri, Marathi, Tamil, etc.)
@@ -264,3 +273,4 @@ Every incoming message classified before processing. Single LLM call (Option B) 
 - Web dashboard for loan officers / NBFC partners
 - Anomaly detection for suspicious entries
 - Lending partnerships (data layer for credit scoring)
+- Upgrade LLM to Claude API for better extraction accuracy (if budget allows)
