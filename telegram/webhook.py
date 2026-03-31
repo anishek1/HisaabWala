@@ -4,6 +4,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 
 from db.models import HandlerResponse
+from services.handler import process_message
 from services.rate_limiter import RateLimiter
 from services.stats import stats_tracker
 from telegram.audio import download_with_retry
@@ -28,38 +29,7 @@ async def is_duplicate(message_id: int) -> bool:
     return False
 
 
-async def _stub_handler(
-    telegram_id: int,
-    telegram_username: str | None,
-    audio_bytes: bytes | None,
-    text: str | None,
-    message_id: int,
-) -> HandlerResponse:
-    # TEMPORARY - replaced on Day 3
-    if text == "/start":
-        return HandlerResponse(
-            messages=[
-                "नमस्ते! मैं हिसाबवाला हूँ। आप अपना टेक्स्ट या वॉइस नोट भेजें, मैं मदद करूँगा।"
-            ]
-        )
 
-    if text == "/help":
-        return HandlerResponse(
-            messages=[
-                "उपयोग: टेक्स्ट या 1 मिनट से छोटा वॉइस नोट भेजें। "
-                "मैं उसे पढ़कर पुष्टि संदेश भेजूँगा।"
-            ]
-        )
-
-    if audio_bytes is not None:
-        return HandlerResponse(
-            messages=[f"वॉइस नोट प्राप्त हुआ। आकार: {len(audio_bytes)} बाइट्स।"]
-        )
-
-    if text:
-        return HandlerResponse(messages=[f"टेक्स्ट प्राप्त हुआ: {text}"])
-
-    return HandlerResponse(messages=["माफ़ कीजिए, मैं संदेश समझ नहीं पाया।"])
 
 
 async def handle_message(message: Message, bot: Bot) -> None:
@@ -135,7 +105,7 @@ async def handle_message(message: Message, bot: Bot) -> None:
             stats_tracker.mark_processed(telegram_id)
             return
 
-        response = await _stub_handler(
+        response = await process_message(
             telegram_id=telegram_id,
             telegram_username=username,
             audio_bytes=audio_bytes,
